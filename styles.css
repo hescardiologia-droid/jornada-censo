@@ -486,3 +486,12 @@ table.semana .corto { display: none; }
   table.censo td.c-tipo { grid-column: 1 / -1; }
 }
 .mis-dias a.fecha-chip { text-decoration: none; }
+
+/* Censos de compra de servicios */
+table.censos-compra td.c-accion { text-align: right; white-space: nowrap; }
+table.previa-censo { margin-top: 10px; background: #fff; }
+table.previa-censo td:first-child { text-align: center; color: var(--tinta-2); }
+@media (max-width: 800px) { table.censos-compra td.c-accion { grid-column: 1 / -1; text-align: left; } }
+table.previa-censo th, table.previa-censo td { text-align: left; }
+table.previa-censo td:nth-child(1), table.previa-censo td:nth-child(6), table.previa-censo td:nth-child(7),
+table.previa-censo th:nth-child(1), table.previa-censo th:nth-child(6), table.previa-censo th:nth-child(7) { text-align: center; }

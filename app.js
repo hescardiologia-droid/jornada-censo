@@ -32,7 +32,7 @@
   const MAX_ARCHIVO = 8 * 1024 * 1024;
 
   const S = {
-    token: '', usuario: null, medicos: [], motivos: [], hospitales: [], config: null, hoy: '', filas: new Map(), repetidas: new Set(),
+    token: '', usuario: null, medicos: [], nombresMedicos: {}, motivos: [], hospitales: [], config: null, hoy: '', filas: new Map(), repetidas: new Set(),
     desde: '', sincronizado: '', cargando: false, errorCarga: '', ui: {}, archivos: new Map(), cupos: null, stats: null, usuarios: null,
     panel: null, detalleAbierto: null, plantillas: [], estadoReportes: null, registro: null
   };
@@ -333,6 +333,7 @@
     const r = await api('inicio');
     S.usuario = r.usuario;
     S.medicos = r.medicos;
+    S.nombresMedicos = r.nombres_medicos || {};
     S.motivos = r.motivos_no;
     S.hospitales = r.hospitales || [];
     S.config = r.config;
@@ -483,6 +484,7 @@
     else if (r[0] === 'agenda') { titulo = esMedico() ? 'Mi agenda' : 'Agenda'; sub = esMedico() ? miMedico() : sub; vistaAgenda(main, /^\d{4}-\d{2}-\d{2}$/.test(r[1] || '') ? r[1] : S.hoy); }
     else if (r[0] === 'censo') { titulo = 'Censo'; sub = 'Todas las solicitudes'; vistaCenso(main); }
     else if (r[0] === 'estadisticas') { titulo = 'Estadísticas'; sub = ''; vistaEstadisticas(main); }
+    else if (r[0] === 'censos-compra') { titulo = 'Censos de compra de servicios'; sub = esMedico() ? miMedico() : 'Formato del Ministerio, por día'; vistaCensosCompra(main); }
     else if (r[0] === 'cupos') { titulo = 'Control de cupos'; vistaCupos(main); }
     else if (r[0] === 'admin' && esAdmin()) { titulo = 'Usuarios y médicos'; sub = ''; vistaAdmin(main); }
     else { volver = false; vistaInicio(main); }
@@ -541,6 +543,7 @@
       h('h3', { class: 'seccion-t' }, 'Gestión'),
       h('div', { class: 'modulos' },
         tarjeta('#/censo', 'util', 'Censo', null, '', 'Todas las solicitudes, con filtros y descarga'),
+        tarjeta('#/censos-compra', 'util', 'Censos de compra de servicios', null, '', esMedico() ? 'Sus estudios realizados por día, en el formato del Ministerio (Word)' : 'Estudios realizados por día y médico, en el formato del Ministerio (Word)'),
         tarjeta('#/estadisticas', 'util', 'Estadísticas', null, '', 'Por médico, hospital, edad, sexo, origen y ocupación de cupos'),
         tarjeta('#/cupos', 'util', 'Control de cupos', null, '', esGestion() ? 'Cupos por día y médico, fechas sin cupos y formulario' : 'Consulta de cupos por día y médico'),
         esAdmin() ? tarjeta('#/admin', 'util', 'Usuarios y médicos', null, '', 'Cuentas de acceso, médicos, plantillas y censo de reportes') : null)
@@ -1899,6 +1902,199 @@
     descargar('censo_compras_' + S.hoy + '.csv', lineas.join('\r\n'));
   }
 
+
+  /* ============================== censos de compra de servicios ============================== */
+  /*
+   * Censo diario del formato del Ministerio ("Pruebas funcionales"): un documento por día y por médico, con los
+   * pacientes a los que ese médico les REALIZÓ el estudio. Nunca se juntan dos días en un documento; si un día
+   * pasa de 15 pacientes, el mismo documento sigue en otra hoja (16, 17…). El Word se arma en el navegador a partir
+   * del formato oficial (plantilla-censo.js), así que conserva exactamente su diseño.
+   */
+  function recalcularNombres() {
+    const m = {};
+    (S.usuarios || []).forEach(function (x) { if (x.rol === 'medico' && x.medico && x.activo && !m[x.medico]) m[x.medico] = x.nombre; });
+    S.nombresMedicos = m;
+  }
+  function nombreCompleto(medico) { return S.nombresMedicos[medico] || medico; }
+  /** Fecha del estudio: la de la cita (aunque se marque otro día). */
+  function fechaEstudio(f) { return f.cita_fecha || String(f.fecha_cierre || '').slice(0, 10); }
+  function sinTildes(t) { return String(t || '').normalize('NFD').replace(/[̀-ͯ]/g, ''); }
+  function nombreArchivo(t) { return sinTildes(t).replace(/[^A-Za-z0-9.-]+/g, '_').replace(/_+/g, '_').replace(/^_|_$/g, ''); }
+
+  let promesaPlantilla = null;
+  function cargarPlantilla() {
+    if (window.PLANTILLA_CENSO) return Promise.resolve(window.PLANTILLA_CENSO);
+    if (!promesaPlantilla) {
+      promesaPlantilla = new Promise(function (ok, mal) {
+        const sc = document.createElement('script');
+        sc.src = 'plantilla-censo.js';
+        sc.onload = function () { window.PLANTILLA_CENSO ? ok(window.PLANTILLA_CENSO) : mal(new Error('El formato del censo no se cargó.')); };
+        sc.onerror = function () { promesaPlantilla = null; mal(new Error('No se pudo cargar el formato del censo. Revise la conexión.')); };
+        document.head.appendChild(sc);
+      });
+    }
+    return promesaPlantilla;
+  }
+
+  /* ---- ZIP mínimo (sin compresión): un .docx es un ZIP con archivos XML ---- */
+  let tablaCrc = null;
+  function crc32(bytes) {
+    if (!tablaCrc) {
+      tablaCrc = new Uint32Array(256);
+      for (let n = 0; n < 256; n++) { let c = n; for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1; tablaCrc[n] = c >>> 0; }
+    }
+    let c = 0xffffffff;
+    for (let i = 0; i < bytes.length; i++) c = tablaCrc[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+    return (c ^ 0xffffffff) >>> 0;
+  }
+  function crearZip(archivos) {
+    const enc = new TextEncoder();
+    const ahora = new Date();
+    const hora = (ahora.getHours() << 11) | (ahora.getMinutes() << 5) | (ahora.getSeconds() >> 1);
+    const fecha = ((ahora.getFullYear() - 1980) << 9) | ((ahora.getMonth() + 1) << 5) | ahora.getDate();
+    const locales = [], centrales = [];
+    let desplazamiento = 0;
+    archivos.forEach(function (a) {
+      const nombre = enc.encode(a.nombre);
+      const datos = typeof a.datos === 'string' ? enc.encode(a.datos) : a.datos;
+      const crc = crc32(datos);
+      const l = new DataView(new ArrayBuffer(30));
+      l.setUint32(0, 0x04034b50, true); l.setUint16(4, 20, true); l.setUint16(6, 0x0800, true); l.setUint16(8, 0, true);
+      l.setUint16(10, hora, true); l.setUint16(12, fecha, true); l.setUint32(14, crc, true);
+      l.setUint32(18, datos.length, true); l.setUint32(22, datos.length, true); l.setUint16(26, nombre.length, true); l.setUint16(28, 0, true);
+      const c = new DataView(new ArrayBuffer(46));
+      c.setUint32(0, 0x02014b50, true); c.setUint16(4, 20, true); c.setUint16(6, 20, true); c.setUint16(8, 0x0800, true); c.setUint16(10, 0, true);
+      c.setUint16(12, hora, true); c.setUint16(14, fecha, true); c.setUint32(16, crc, true); c.setUint32(20, datos.length, true); c.setUint32(24, datos.length, true);
+      c.setUint16(28, nombre.length, true); c.setUint32(42, desplazamiento, true);
+      locales.push(new Uint8Array(l.buffer), nombre, datos);
+      centrales.push(new Uint8Array(c.buffer), nombre);
+      desplazamiento += 30 + nombre.length + datos.length;
+    });
+    const tamCentral = centrales.reduce(function (s, x) { return s + x.length; }, 0);
+    const fin = new DataView(new ArrayBuffer(22));
+    fin.setUint32(0, 0x06054b50, true); fin.setUint16(8, archivos.length, true); fin.setUint16(10, archivos.length, true);
+    fin.setUint32(12, tamCentral, true); fin.setUint32(16, desplazamiento, true);
+    const partes = locales.concat(centrales, [new Uint8Array(fin.buffer)]);
+    const out = new Uint8Array(partes.reduce(function (s, x) { return s + x.length; }, 0));
+    let i = 0;
+    partes.forEach(function (x) { out.set(x, i); i += x.length; });
+    return out;
+  }
+  function xml(t) { return String(t === undefined || t === null ? '' : t).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;'); }
+  /** Texto de una celda (Arial 8, como el resto del formato). */
+  function runCelda(t) {
+    if (t === '' || t === undefined || t === null) return '';
+    return '<w:r><w:rPr><w:rFonts w:ascii="Arial" w:cs="Arial" w:eastAsia="Arial" w:hAnsi="Arial"/><w:color w:val="000000"/><w:sz w:val="16"/><w:szCs w:val="16"/></w:rPr><w:t xml:space="preserve">' + xml(t) + '</w:t></w:r>';
+  }
+  /** Filas del censo de un día: [fecha, hospital, expediente, nombre, edad, sexo] */
+  function filasCenso(pacientes) {
+    return pacientes.map(function (f) {
+      return [fechaCorta(fechaEstudio(f)), f.hospital, f.expediente, f.nombre, f.edad === '' ? '' : String(Number(f.edad)), f.sexo ? f.sexo.charAt(0).toUpperCase() : ''];
+    });
+  }
+  /** Documento Word del censo de UN día y UN médico. */
+  function documentoCenso(P, medico, pacientes) {
+    const filas = filasCenso(pacientes);
+    const hojas = Math.max(1, Math.ceil(filas.length / P.filas));
+    const bloques = [];
+    for (let hj = 0; hj < hojas; hj++) {
+      const base = hj * P.filas;
+      bloques.push(P.bloque
+        .replace('{{MEDICO}}', xml(nombreCompleto(medico)))
+        .replace(/\{\{N(\d+)\}\}/g, function (m, k) { return String(base + Number(k)); })
+        .replace(/\{\{C(\d+)_(\d+)\}\}/g, function (m, k, j) { const f = filas[base + Number(k) - 1]; return f ? runCelda(f[Number(j) - 1]) : ''; }));
+    }
+    const salto = '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+    const documento = P.inicio + bloques.join(salto) + P.fin;
+    return crearZip(P.archivos.map(function (a) { return { nombre: a[0], datos: a[1] }; }).concat([{ nombre: 'word/document.xml', datos: documento }]));
+  }
+  function bajar(nombre, bytes, tipo) {
+    const url = URL.createObjectURL(new Blob([bytes], { type: tipo }));
+    const a = h('a', { href: url, download: nombre });
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(function () { URL.revokeObjectURL(url); }, 5000);
+  }
+  const TIPO_DOCX = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+  function archivoCenso(g) { return 'Censo_' + fechaCorta(g.fecha).replace(/\//g, '-') + '_' + nombreArchivo(g.medico) + '.docx'; }
+  async function descargarCenso(g, btn) {
+    try {
+      const P = await conBoton(btn, cargarPlantilla);
+      bajar(archivoCenso(g), documentoCenso(P, g.medico, g.pacientes), TIPO_DOCX);
+    } catch (e) { tostada(e.message, { error: true }); }
+  }
+  async function descargarMes(grupos, mes, medico, btn) {
+    try {
+      const P = await conBoton(btn, cargarPlantilla);
+      const zip = crearZip(grupos.map(function (g) { return { nombre: archivoCenso(g), datos: documentoCenso(P, g.medico, g.pacientes) }; }));
+      bajar('Censos_' + mes + '_' + (medico ? nombreArchivo(medico) : 'todos_los_medicos') + '.zip', zip, 'application/zip');
+    } catch (e) { tostada(e.message, { error: true }); }
+  }
+
+  function vistaCensosCompra(main) {
+    const u = ui('compra', { mes: (S.hoy || new Date().toISOString().slice(0, 10)).slice(0, 7), medico: '', abierto: '' });
+    if (esMedico()) u.medico = miMedico();
+    if (esMedico() && !miMedico()) {
+      main.appendChild(h('div', { class: 'aviso alerta' }, 'Su usuario no está vinculado a ningún médico de la lista. Pida al administrador que lo vincule en "Usuarios y médicos".'));
+      return;
+    }
+    const inicioMes = u.mes + '-01';
+    if (S.desde && inicioMes < S.desde) {
+      main.appendChild(h('div', { class: 'vacio' }, 'Cargando los estudios de ese mes…'));
+      cargarAntiguos(inicioMes).then(function () { if (ruta()[0] === 'censos-compra') pintar(); }).catch(function (e) { tostada(e.message, { error: true }); });
+      return;
+    }
+    const delMes = function (f) { return fechaEstudio(f).slice(0, 7) === u.mes; };
+    const realizados = filasArr().filter(function (f) { return f.estado === 'REALIZADO' && f.realizado_por && delMes(f) && (!u.medico || f.realizado_por === u.medico); });
+    const mapa = {};
+    realizados.forEach(function (f) { const k = fechaEstudio(f) + '|' + f.realizado_por; (mapa[k] = mapa[k] || { fecha: fechaEstudio(f), medico: f.realizado_por, pacientes: [] }).pacientes.push(f); });
+    const grupos = Object.keys(mapa).sort().map(function (k) {
+      const g = mapa[k];
+      g.pacientes.sort(function (a, b) { return cmp(a.cita_hora, b.cita_hora) || a.nombre.localeCompare(b.nombre, 'es'); });
+      return g;
+    });
+    const sinMarcar = filasArr().filter(function (f) {
+      return f.estado === 'PENDIENTE' && f.cita_fecha && f.cita_fecha < S.hoy && f.cita_fecha.slice(0, 7) === u.mes && (!u.medico || f.cita_medico === u.medico);
+    }).length;
+    const sinNombre = Array.from(new Set(grupos.map(function (g) { return g.medico; }))).filter(function (m) { return !S.nombresMedicos[m]; });
+    const opMedicos = [['', 'Todos los médicos']].concat(S.medicos.map(function (m) { return [m.nombre, m.nombre]; }));
+    const total = realizados.length;
+    agregar(main, [
+      h('div', { class: 'cab' }, h('h2', null, 'Censos de ' + MESES[Number(u.mes.slice(5)) - 1] + ' de ' + u.mes.slice(0, 4)),
+        h('div', { class: 'campo no-imprimir', style: 'margin:0;flex:0 0 170px' }, h('label', { for: 'cc-mes' }, 'Mes'),
+          h('input', { type: 'month', id: 'cc-mes', value: u.mes, max: S.hoy.slice(0, 7), onchange: function (ev) { if (ev.target.value) { u.mes = ev.target.value; u.abierto = ''; pintar(); } } })),
+        !esMedico() ? h('div', { class: 'campo no-imprimir', style: 'margin:0;flex:0 0 220px' }, h('label', { for: 'cc-medico' }, 'Médico'),
+          selector(opMedicos, u.medico, { id: 'cc-medico', onchange: function (ev) { u.medico = ev.target.value; u.abierto = ''; pintar(); } })) : null,
+        grupos.length ? h('button', { class: 'btn oscuro', onclick: function (ev) { descargarMes(grupos, u.mes, u.medico, ev.currentTarget); } },
+          'Descargar todo el mes (' + plural(grupos.length, 'documento', 'documentos') + ', .zip)') : null),
+      h('p', { class: 'ayuda-tab' }, 'Un documento de Word por día' + (u.medico ? '' : ' y por médico') + ', en el formato del Ministerio, con los pacientes marcados como realizados en la agenda. Nunca se juntan dos días; si un día pasa de 15 pacientes, el documento sigue en una segunda hoja.'),
+      sinMarcar ? h('a', { class: 'aviso alerta aviso-enlace', href: '#/censo', onclick: function () {
+        Object.assign(uiCenso(), { reporte: '', q: '', hosp: '', estado: 'VENCIDA', medico: u.medico, origen: '' });
+      } }, h('b', null, plural(sinMarcar, 'cita de este mes sigue', 'citas de este mes siguen') + ' sin marcar.'), ' No aparecen en el censo hasta que se marquen como realizadas en la agenda. Toque aquí para verlas.') : null,
+      sinNombre.length ? h('div', { class: 'aviso alerta' }, 'Sin nombre completo: ' + sinNombre.join(', ') + '. El censo dirá solo ese nombre. Para que salga completo, cree el usuario del médico (o vincúlelo) en "Usuarios y médicos": se usa su "Nombre".') : null,
+      grupos.length ? h('div', { class: 'tabla-caja' }, h('div', { class: 'tabla-scroll' }, h('table', { class: 'censo censos-compra' },
+        h('thead', null, h('tr', null, h('th', null, 'Día'), h('th', null, 'Médico'), h('th', null, 'Pacientes'), h('th', null, ''))),
+        h('tbody', null, grupos.map(function (g) {
+          const k = g.fecha + '|' + g.medico;
+          const abierto = u.abierto === k;
+          const filas = [h('tr', { class: abierto ? 'abierta' : '', tabindex: '0', onclick: function () { u.abierto = abierto ? '' : k; pintar(); } },
+            h('td', { 'data-e': 'Día' }, h('b', null, fechaLarga(g.fecha))),
+            h('td', { 'data-e': 'Médico' }, nombreCompleto(g.medico)),
+            h('td', { 'data-e': 'Pacientes' }, plural(g.pacientes.length, 'paciente', 'pacientes') + (g.pacientes.length > 15 ? ' (2 hojas)' : ''), h('span', { class: 'fl' }, abierto ? ' ▲' : ' ▼')),
+            h('td', { class: 'c-accion' }, h('button', { class: 'btn primario chico', onclick: function (ev) { ev.stopPropagation(); descargarCenso(g, ev.currentTarget); } }, 'Descargar Word')))];
+          if (abierto) {
+            filas.push(h('tr', { class: 'plegable' }, h('td', { colspan: '4' }, h('table', { class: 'cruce previa-censo' },
+              h('thead', null, h('tr', null, ['N°', 'Fecha', 'Nombre del hospital', 'Expediente', 'Nombre completo del paciente', 'Edad', 'Sexo'].map(function (t) { return h('th', null, t); }))),
+              h('tbody', null, filasCenso(g.pacientes).map(function (x, i) { return h('tr', null, h('td', null, i + 1), x.map(function (v) { return h('td', null, v); })); }))))));
+          }
+          return filas;
+        })))),
+        h('div', { class: 'pie-tabla' }, h('span', null, plural(total, 'estudio realizado', 'estudios realizados') + ' en ' + plural(grupos.length, 'censo', 'censos')))) :
+        h('div', { class: 'tabla-caja' }, h('div', { class: 'vacio' }, S.sincronizado ? 'No hay estudios marcados como realizados ' + (u.medico ? 'por ' + u.medico + ' ' : '') + 'en este mes.' : 'Cargando…'))
+    ]);
+  }
+
   /* ============================== control de cupos ============================== */
   function vistaCupos(main) {
     if (!S.cupos) {
@@ -2154,7 +2350,7 @@
     const fu = ui('nuevoUsuario', { usuario: '', nombre: '', rol: 'ts', medico: '', clave: '', medicoNuevo: '' });
     const nuevoMedico = h('input', { type: 'text', id: 'nm', maxlength: 60, placeholder: 'Ej. Dra. Apellido', value: fu.medicoNuevo, oninput: function (ev) { fu.medicoNuevo = ev.target.value; } });
     const actualizar = async function (cambio, mensaje) {
-      try { const r = await api('usuarios.actualizar', cambio); S.usuarios = r.usuarios; pintar(); tostada(mensaje); } catch (e) { tostada(e.message, { error: true }); pintar(); }
+      try { const r = await api('usuarios.actualizar', cambio); S.usuarios = r.usuarios; recalcularNombres(); pintar(); tostada(mensaje); } catch (e) { tostada(e.message, { error: true }); pintar(); }
     };
     const opRoles = [['ts', 'Trabajo Social'], ['medico', 'Médico'], ['admin', 'Administrador']];
     const opMedicos = [['', 'Elija el médico…']].concat(S.medicos.map(function (m) { return [m.nombre, m.nombre]; }));
@@ -2205,6 +2401,7 @@
           try {
             const r = await api('usuarios.crear', { usuario: nu.usuario.value, nombre: nu.nombre.value, rol: nu.rol.value, medico: nu.medico.value, clave: nu.clave.value });
             S.usuarios = r.usuarios;
+            recalcularNombres();
             Object.assign(fu, { usuario: '', nombre: '', rol: 'ts', medico: '', clave: '' });
             pintar();
             tostada('Usuario creado. Entréguele su contraseña temporal en persona.');
