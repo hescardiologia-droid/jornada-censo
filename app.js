@@ -1564,11 +1564,10 @@
     return e.dias === 1 ? '1 día' : e.dias + ' días';
   }
   const CAMPOS_REG = [
-    { k: 'hospital', t: 'Hospital que refiere', tipo: 'hospital', ancho: true,
-      ayuda: 'Escriba parte del nombre o del lugar ("zacamil", "bloom", "consulta"…). Si no está en la lista, elija "Otro".' },
+    { k: 'hospital', t: 'Hospital que refiere', tipo: 'hospital', ancho: true },
     { k: 'expediente', t: 'Expediente del paciente', tipo: 'texto', max: 30, mayus: true },
     { k: 'nombre', t: 'Nombre completo del paciente', tipo: 'texto', max: 120 },
-    { k: 'fecha_nacimiento', t: 'Fecha de nacimiento o edad', tipo: 'nacimiento', opcional: true },
+    { k: 'fecha_nacimiento', t: 'Fecha de nacimiento', tipo: 'fecha' },
     { k: 'sexo', t: 'Sexo', tipo: 'radio', op: SEXOS },
     { k: 'motivo', t: 'Motivo del estudio', tipo: 'area', ancho: true, opcional: true },
     { k: 'ekg', t: 'Electrocardiograma', tipo: 'archivo', opcional: true },
@@ -1583,17 +1582,13 @@
   }
   function validarRegistro() {
     const R = S.registro, v = R.valores, err = {};
-    // Fecha de nacimiento o edad: no es obligatoria; si no hay fecha, se revisa la edad escrita.
-    if (!String(v.fecha_nacimiento || '').trim() && String(v.edad || '').trim() && !(/^\d{1,3}$/.test(String(v.edad).trim()) && Number(v.edad) <= 120)) {
-      err.fecha_nacimiento = 'Escriba la edad en años (0 a 120).';
-    }
     CAMPOS_REG.forEach(function (c) {
       const valor = c.tipo === 'archivo' ? R.archivos[c.k] : String(v[c.k] || '').trim();
       if (!valor) { if (!c.opcional) err[c.k] = 'Esta pregunta es obligatoria.'; return; }
       if (c.k === 'hospital' && valor === OTRO && String(v.hospital_otro || '').trim().length < 3) err[c.k] = 'Escriba el nombre del hospital.';
       if (c.k === 'nombre' && valor.length < 3) err[c.k] = 'Escriba el nombre completo.';
       if (c.k === 'expediente' && !/^[A-Za-z0-9][A-Za-z0-9 .\/-]*$/.test(valor)) err[c.k] = 'Use solo números, letras, guion o diagonal.';
-      if (c.k === 'fecha_nacimiento') { const e = edadDe(valor); if (!e) err[c.k] = 'Escriba una fecha real y no futura (DD/MM/AAAA), o borre la fecha y escriba solo la edad.'; else if (e.anios > 120) err[c.k] = 'Revise el año de nacimiento.'; }
+      if (c.k === 'fecha_nacimiento') { const e = edadDe(valor); if (!e) err[c.k] = 'Escriba una fecha real y no futura (DD/MM/AAAA).'; else if (e.anios > 120) err[c.k] = 'Revise el año de nacimiento.'; }
       if (c.k === 'peso' && !(Number(valor) >= 0.3 && Number(valor) <= 400)) err[c.k] = 'Escriba el peso en kilogramos (0.3 a 400).';
       if (c.k === 'talla') {
         if (Number(valor) > 0 && Number(valor) < 3) err[c.k] = 'Escriba la talla en centímetros: ' + valor + ' m = ' + Math.round(Number(valor) * 100) + ' cm.';
@@ -1607,71 +1602,6 @@
     if (R.agendar === 'ahora') { const p = validarSt(R.cita); if (p) err.cita = p; }
     return err;
   }
-  /** Lista de hospitales con buscador ("Otro" siempre al final). actual() devuelve el valor elegido; poner(v) lo guarda. */
-  function buscadorHospital(id, actual, poner) {
-    const idLista = id + '-lista';
-    const texto = function (v) { return v === OTRO ? OTRO_TEXTO : v || ''; };
-    const input = h('input', { id: id, type: 'text', role: 'combobox', 'aria-expanded': 'false', 'aria-controls': idLista, 'aria-autocomplete': 'list',
-      autocomplete: 'off', spellcheck: 'false', placeholder: 'Escriba para buscar…', value: texto(actual()) });
-    const lista = h('ul', { id: idLista, role: 'listbox', class: 'combo-lista', hidden: true, 'aria-label': 'Hospitales' });
-    const btn = h('button', { type: 'button', class: 'combo-btn', tabindex: '-1', 'aria-label': 'Mostrar todos los hospitales' }, '▾');
-    let visibles = [], activo = -1;
-    const resaltar = function (t, palabras) {
-      if (!palabras.length) return t;
-      const n = norm(t);
-      const marcas = new Array(t.length).fill(false);
-      palabras.forEach(function (p) { let i = n.indexOf(p); while (i >= 0) { for (let j = i; j < i + p.length; j++) marcas[j] = true; i = n.indexOf(p, i + p.length); } });
-      const partes = [];
-      let i = 0;
-      while (i < t.length) { let j = i; while (j < t.length && marcas[j] === marcas[i]) j++; partes.push(marcas[i] ? h('mark', null, t.slice(i, j)) : t.slice(i, j)); i = j; }
-      return partes;
-    };
-    const marcarActivo = function () {
-      Array.prototype.forEach.call(lista.querySelectorAll('[role=option]'), function (li, i) { li.setAttribute('aria-selected', String(i === activo)); });
-      const li = document.getElementById(id + '-op-' + activo);
-      if (activo >= 0 && li) { input.setAttribute('aria-activedescendant', li.id); li.scrollIntoView({ block: 'nearest' }); } else input.removeAttribute('aria-activedescendant');
-    };
-    const cerrar = function () { lista.hidden = true; input.setAttribute('aria-expanded', 'false'); input.removeAttribute('aria-activedescendant'); };
-    const elegir = function (x) { input.value = texto(x); poner(x); cerrar(); };
-    const abrir = function (todos) {
-      const q = todos ? '' : norm(input.value).replace(/["“”.,]/g, ' ').trim();
-      const palabras = q ? q.split(/\s+/).filter(function (p) { return p && p !== 'h' && p !== 'n'; }) : [];
-      visibles = S.hospitales.filter(function (x) { const n = norm(x); return palabras.every(function (p) { return n.indexOf(p) >= 0; }); }).concat([OTRO]);
-      lista.textContent = '';
-      activo = visibles.indexOf(actual());
-      if (visibles.length === 1) lista.appendChild(h('li', { class: 'nada', role: 'presentation' }, 'No se encontró ningún hospital con ese texto.'));
-      visibles.forEach(function (x, i) {
-        lista.appendChild(h('li', { id: id + '-op-' + i, role: 'option', class: (x === actual() ? 'elegido' : '') + (x === OTRO ? ' otro' : ''), 'aria-selected': String(i === activo),
-          onpointerdown: function (ev) { ev.preventDefault(); elegir(x); } }, x === OTRO ? OTRO_TEXTO : resaltar(x, palabras)));
-      });
-      lista.hidden = false;
-      input.setAttribute('aria-expanded', 'true');
-      marcarActivo();
-    };
-    input.addEventListener('focus', function () { abrir(input.value === texto(actual())); });
-    input.addEventListener('input', function () { if (input.value !== texto(actual())) poner(''); abrir(false); });
-    input.addEventListener('keydown', function (ev) {
-      if (ev.key === 'ArrowDown' || ev.key === 'ArrowUp') {
-        ev.preventDefault();
-        if (lista.hidden) { abrir(false); return; }
-        activo = ev.key === 'ArrowDown' ? Math.min(visibles.length - 1, activo + 1) : Math.max(0, activo - 1);
-        marcarActivo();
-      } else if (ev.key === 'Enter') {
-        if (!lista.hidden && visibles.length) { ev.preventDefault(); elegir(visibles[activo >= 0 ? activo : 0]); }
-      } else if (ev.key === 'Escape') { cerrar(); }
-    });
-    input.addEventListener('blur', function () {
-      cerrar();
-      if (!actual()) {
-        const exacto = S.hospitales.concat([OTRO]).filter(function (x) { return norm(texto(x)) === norm(input.value.trim()); })[0];
-        if (exacto) elegir(exacto);
-      }
-    });
-    btn.addEventListener('pointerdown', function (ev) { ev.preventDefault(); });
-    btn.addEventListener('click', function () { if (lista.hidden) { input.focus(); abrir(true); } else cerrar(); });
-    return h('div', { class: 'combo' }, input, btn, lista);
-  }
-
   function campoRegistro(c, n) {
     const R = S.registro;
     const id = 'rg-' + c.k;
@@ -1683,12 +1613,9 @@
       const otro = h('input', { type: 'text', id: 'rg-hospital_otro', maxlength: 120, placeholder: 'Escriba el nombre del hospital', value: R.valores.hospital_otro || '',
         'aria-label': 'Nombre del hospital (otro)', oninput: function (ev) { R.valores.hospital_otro = ev.target.value; R.sucio = true; } });
       const cajaOtro = h('div', { style: 'margin-top:8px', hidden: R.valores.hospital !== OTRO }, otro);
-      const buscador = buscadorHospital(id, function () { return R.valores.hospital || ''; }, function (v) {
-        poner(v);
-        cajaOtro.hidden = v !== OTRO;
-        if (v === OTRO) setTimeout(function () { otro.focus(); }, 0);
-      });
-      agregar(caja, [h('label', { for: id }, etiqueta), buscador, cajaOtro]);
+      const sel = selector([['', 'Seleccione…']].concat(S.hospitales.map(function (x) { return [x, x]; })).concat([[OTRO, OTRO_TEXTO]]), R.valores.hospital || '',
+        { id: id, onchange: function (ev) { poner(ev.target.value); cajaOtro.hidden = ev.target.value !== OTRO; if (ev.target.value === OTRO) otro.focus(); } });
+      agregar(caja, [h('label', { for: id }, etiqueta), sel, cajaOtro]);
     } else if (c.tipo === 'texto') {
       agregar(caja, [h('label', { for: id }, etiqueta), h('input', { type: 'text', id: id, maxlength: c.max, value: R.valores[c.k] || '', autocomplete: 'off',
         autocapitalize: c.mayus ? 'characters' : 'words', spellcheck: c.mayus ? 'false' : null, oninput: function (ev) { poner(ev.target.value); } })]);
@@ -1716,40 +1643,13 @@
           poner(v);
         } });
       agregar(caja, [h('label', { for: id }, etiqueta), c.sufijo ? h('div', { class: 'con-sufijo' }, inp, h('span', null, c.sufijo)) : inp]);
-    } else if (c.tipo === 'nacimiento') {
-      // Se escribe la fecha de nacimiento (la edad se calcula) o, si no se conoce, solo la edad en años.
+    } else if (c.tipo === 'fecha') {
       const largos = [2, 2, 4], ph = ['DD', 'MM', 'AAAA'], aria = ['Día de nacimiento', 'Mes de nacimiento', 'Año de nacimiento'];
       const previo = String(R.valores[c.k] || '').split('/');
       const entradas = [];
       const calculo = h('div', { class: 'calculo', 'aria-live': 'polite' });
-      const edad = h('input', { type: 'text', id: 'rg-edad', inputmode: 'numeric', maxlength: 3, class: 'seg-4', placeholder: 'años', 'aria-label': 'Edad en años',
-        value: R.valores.edad || '',
-        oninput: function (ev) {
-          const v = ev.target.value.replace(/\D/g, '').slice(0, 3);
-          if (v !== ev.target.value) ev.target.value = v;
-          R.valores.edad = v; R.sucio = true;
-          if (R.errores[c.k]) { delete R.errores[c.k]; caja.classList.remove('mal'); msg.textContent = ''; }
-          mostrarEdad(); bloquear();
-        } });
-      const bloquear = function () {
-        const conFecha = !!R.valores[c.k], conEdad = !!R.valores.edad;
-        entradas.forEach(function (x) { x.disabled = conEdad && !conFecha; });
-        edad.disabled = conFecha;
-        if (conFecha) { const e = edadDe(R.valores[c.k]); edad.value = e ? String(e.anios) : ''; }
-      };
-      const mostrarEdad = function () {
-        calculo.textContent = '';
-        const e = edadDe(R.valores[c.k]);
-        if (e) agregar(calculo, ['Edad: ', h('b', null, textoEdad(e))]);
-        else if (!R.valores[c.k] && R.valores.edad) agregar(calculo, ['Edad: ', h('b', null, plural(Number(R.valores.edad), 'año', 'años')), ' (sin fecha de nacimiento)']);
-        else if (!R.valores[c.k]) calculo.textContent = 'Si no conoce la fecha, escriba solo la edad. Puede quedar en blanco.';
-      };
-      const actualizar = function () {
-        const p = entradas.map(function (x) { return x.value; });
-        poner(p.some(Boolean) ? p.join('/') : '');
-        if (R.valores[c.k]) R.valores.edad = '';
-        mostrarEdad(); bloquear();
-      };
+      const mostrarEdad = function () { calculo.textContent = ''; const e = edadDe(R.valores[c.k]); if (e) agregar(calculo, ['Edad: ', h('b', null, textoEdad(e))]); };
+      const actualizar = function () { const p = entradas.map(function (x) { return x.value; }); poner(p.some(Boolean) ? p.join('/') : ''); mostrarEdad(); };
       largos.forEach(function (largo, i) {
         const inp = h('input', { type: 'text', inputmode: 'numeric', maxlength: largo, class: 'seg-' + largo, placeholder: ph[i], 'aria-label': aria[i], id: i === 0 ? id : null, value: previo[i] || '',
           oninput: function (ev) {
@@ -1767,10 +1667,7 @@
       });
       const grupo = h('div', { class: 'segmentos', role: 'group', 'aria-labelledby': 'etq-' + id });
       entradas.forEach(function (inp, i) { if (i) grupo.appendChild(h('span', { class: 'sep', 'aria-hidden': 'true' }, '/')); grupo.appendChild(inp); });
-      grupo.appendChild(h('span', { class: 'o-edad' }, 'o edad'));
-      grupo.appendChild(edad);
       mostrarEdad();
-      bloquear();
       agregar(caja, [h('div', { class: 'etq', id: 'etq-' + id }, etiqueta), grupo, calculo]);
     } else if (c.tipo === 'archivo') {
       const zona = h('div', { class: 'zona' });
@@ -1888,7 +1785,6 @@
         const datos = {};
         CAMPOS_REG.forEach(function (c) { if (c.tipo !== 'archivo') datos[c.k] = String(R.valores[c.k] || '').trim(); });
         datos.hospital_otro = datos.hospital === OTRO ? String(R.valores.hospital_otro || '').trim() : '';
-        datos.edad = datos.fecha_nacimiento ? '' : String(R.valores.edad || '').trim();
         const cuerpo = { datos: datos, id_cliente: R.idCliente };
         for (const k of ['ekg', 'rx']) if (R.archivos[k]) cuerpo[k] = { b64: await aBase64(R.archivos[k].blob) };
         if (conf) cuerpo.cita = { fecha: R.cita.fecha, hora: R.cita.hora, medico: R.cita.medico, sobrecupo: conf.sobrecupo, extracurricular: conf.extracurricular };
