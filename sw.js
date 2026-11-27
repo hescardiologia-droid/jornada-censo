@@ -1,7 +1,7 @@
 // Service worker: guarda la "cáscara" de la app para que abra aunque la conexión falle.
-// Nunca guarda solicitudes ni datos de pacientes: solo los archivos de la propia app.
-const CACHE = 'cardio-compras-formulario-v2';
-const ARCHIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png'];
+// Nunca guarda el censo ni datos de pacientes: solo los archivos de la propia app.
+const CACHE = 'cardio-compras-gestion-v3';
+const ARCHIVOS = ['./', 'index.html', 'styles.css', 'app.js', 'config.js', 'manifest.webmanifest', 'plantilla-censo.js', 'icons/icon-192.png', 'icons/icon-512.png'];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(ARCHIVOS)).then(() => self.skipWaiting()));
